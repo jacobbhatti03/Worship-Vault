@@ -6,9 +6,6 @@ import math
 import requests
 from datetime import datetime, timedelta
 import uuid
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # --------- Config (set these in Streamlit secrets or .env) ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
