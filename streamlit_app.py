@@ -1,112 +1,233 @@
+# app.py
 import streamlit as st
 from pathlib import Path
-from datetime import datetime
-from supabase import create_client
-import os
+from dotenv import load_dotenv
+import os, math, json
+from uuid import uuid4
 
-# -------------------------------
-# CONFIG
-# -------------------------------
-SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
-MASTER_ADMIN_KEY = st.secrets.get("MASTER_ADMIN_KEY") or os.getenv("MASTER_ADMIN_KEY")
+# ---------------------------
+# Config
+# ---------------------------
+load_dotenv()
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("❌ Missing Supabase credentials.")
-    st.stop()
+VAULTS_FOLDER = Path("vaults")
+VAULTS_FOLDER.mkdir(exist_ok=True)
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Persistent device ID
+DEVICE_FILE = Path("device.id")
+if not DEVICE_FILE.exists():
+    DEVICE_FILE.write_text(str(uuid4()))
+DEVICE_ID = DEVICE_FILE.read_text().strip()
 
-# -------------------------------
-# BUCKET HELPER
-# -------------------------------
-def create_bucket_if_needed(bucket_name: str):
-    """Ensure bucket exists before upload."""
-    try:
-        res = supabase.storage.get_buckets()
-        buckets = res.get("data", []) if isinstance(res, dict) else []
-        if any((b.get("name") == bucket_name) for b in buckets if isinstance(b, dict)):
-            return
-        supabase.storage.create_bucket(bucket_name, public=False)
-    except Exception as e:
-        st.error(f"Bucket check failed: {e}")
+MASTER_ADMIN_KEY = os.getenv("MASTER_ADMIN_KEY", "YOUR_MASTER_KEY")
 
-def upload_to_bucket(bucket_name: str, file_obj, filename: str):
-    """Upload file to Supabase bucket (auto-create if missing)."""
-    try:
-        create_bucket_if_needed(bucket_name)
-        data = file_obj.getbuffer().tobytes() if hasattr(file_obj, "getbuffer") else file_obj.read()
-        supabase.storage.from_(bucket_name).upload(filename, data)
+# ---------------------------
+# Session state defaults
+# ---------------------------
+defaults = {
+    "vault_name": None,
+    "is_admin_internal": False,
+    "member_key": None,
+    "page": "home",
+    "action": None
+}
+for k, v in defaults.items():
+    st.session_state.setdefault(k, v)
+
+# ---------------------------
+# Helpers
+# ---------------------------
+def go_home():
+    for k in ["vault_name", "is_admin_internal", "member_key", "page", "action"]:
+        st.session_state[k] = None if k != "page" else "home"
+
+def vault_path(name: str):
+    path = VAULTS_FOLDER / name
+    path.mkdir(exist_ok=True)
+    return path
+
+def list_files(vault_name):
+    path = vault_path(vault_name)
+    return sorted(
+        [f.name for f in path.iterdir() if f.is_file() and not f.name.startswith(".")],
+        key=lambda s: s.lower(),
+    )
+
+def save_file(vault_name, uploaded_file):
+    path = vault_path(vault_name) / uploaded_file.name
+    with open(path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+def rename_file(vault_name, old_name, new_name):
+    old_path = vault_path(vault_name) / old_name
+    new_path = vault_path(vault_name) / new_name
+    if old_path.exists():
+        old_path.rename(new_path)
         return True
-    except Exception as e:
-        st.error(f"Upload failed: {e}")
-        return False
+    return False
 
-# -------------------------------
-# GALLERY PAGE
-# -------------------------------
-def gallery_page(vault_name: str):
-    st.title(f"📁 {vault_name} Gallery")
+def delete_file(vault_name, filename):
+    path = vault_path(vault_name) / filename
+    if path.exists():
+        path.unlink()
+        return True
+    return False
 
-    try:
-        res = supabase.storage.from_(vault_name).list()
-        if not res or not isinstance(res, list):
-            st.info("No files found.")
-            return
+# ---------------------------
+# Pages
+# ---------------------------
+def vault_page():
+    vault_name = st.session_state.vault_name
+    st.header(f"📂 Vault — {vault_name}")
 
-        for file in res:
-            name = file.get("name", "unknown")
-            url = f"{SUPABASE_URL}/storage/v1/object/public/{vault_name}/{name}"
-            st.markdown(f"📄 [{name}]({url})")
-    except Exception as e:
-        st.error(f"Failed to load gallery: {e}")
+    c1, c2 = st.columns([1, 1])
+    if c1.button("⬅ Back to home"):
+        go_home()
+        st.session_state.action = "home"
+    if c2.button("📸 Open Gallery"):
+        st.session_state.page = "gallery"
+        st.session_state.action = "gallery"
 
-    if st.button("⬅️ Back to Vault", use_container_width=True):
-        st.session_state["page"] = "vault"
-        st.rerun()
+    uploaded_files = st.file_uploader("Upload images/PDFs", accept_multiple_files=True)
+    if uploaded_files:
+        for f in uploaded_files:
+            save_file(vault_name, f)
+        st.success("Uploaded successfully!")
 
-# -------------------------------
-# VAULT PAGE
-# -------------------------------
-def vault_page(vault_name: str):
-    st.subheader(f"🔒 Vault: {vault_name}")
+def gallery_page():
+    vault_name = st.session_state.vault_name
+    st.header(f"🖼️ Gallery — {vault_name}")
 
-    col1, col2 = st.columns([1, 3])
+    if st.button("⬅ Back to Vault"):
+        st.session_state.page = "vault"
+        st.session_state.action = "vault"
 
-    with col1:
-        if st.button("📁 Gallery", use_container_width=True):
-            st.session_state["page"] = "gallery"
-            st.session_state["vault_name"] = vault_name
-            st.rerun()
+    files = list_files(vault_name)
+    if not files:
+        st.info("No files yet.")
+        return
 
-    with col2:
-        file = st.file_uploader("Upload File", type=["png", "jpg", "jpeg", "pdf", "txt"])
-        if file:
-            if upload_to_bucket(vault_name, file, file.name):
-                st.success("✅ Upload complete!")
+    per_row = 3
+    rows = math.ceil(len(files) / per_row)
+    idx = 0
 
-# -------------------------------
-# MAIN APP
-# -------------------------------
-st.title("📚 Worship Vault")
+    for _ in range(rows):
+        cols = st.columns(per_row, gap="large")
+        for c in range(per_row):
+            if idx >= len(files):
+                break
+            fname = files[idx]
+            ext = fname.split(".")[-1].lower()
+            with cols[c]:
+                if ext in ("jpg", "jpeg", "png", "gif", "webp"):
+                    st.image(str(vault_path(vault_name) / fname))
+                else:
+                    st.write("📄 File")
 
-# Initialize navigation state
-if "page" not in st.session_state:
-    st.session_state["page"] = "home"
+                st.markdown(f"**{fname}**")
 
-# HOME PAGE
-if st.session_state["page"] == "home":
-    vault_name = st.text_input("Enter Vault Name")
-    if vault_name:
-        if st.button("Enter Vault", use_container_width=True):
-            st.session_state["vault_name"] = vault_name
-            st.session_state["page"] = "vault"
-            st.rerun()
+                # Admin-only actions
+                if st.session_state.is_admin_internal:
+                    new_name = st.text_input("Rename to", value=fname, key=f"rename_{fname}")
+                    if st.button("Rename", key=f"btn_rn_{fname}"):
+                        rename_file(vault_name, fname, new_name)
+                        st.session_state.action = "refresh"
+                    if st.button("Delete", key=f"btn_del_{fname}"):
+                        delete_file(vault_name, fname)
+                        st.session_state.action = "refresh"
+            idx += 1
 
-# VAULT PAGE
-elif st.session_state["page"] == "vault":
-    vault_page(st.session_state.get("vault_name", ""))
+def home_page():
+    st.title("🙏 Worship Vault")
+    st.divider()
 
-# GALLERY PAGE
-elif st.session_state["page"] == "gallery":
-    gallery_page(st.session_state.get("vault_name", ""))
+    # Auto-login if this device owns any vault
+    auto_vault = None
+    for v in VAULTS_FOLDER.iterdir():
+        if v.is_dir() and (v / ".creator_device").exists():
+            creator = (v / ".creator_device").read_text().strip()
+            if creator == DEVICE_ID:
+                auto_vault = v.name
+                break
+
+    if auto_vault:
+        st.info(f"💾 This device owns vault: **{auto_vault}**")
+        if st.button("Login as Admin"):
+            st.session_state.vault_name = auto_vault
+            st.session_state.is_admin_internal = True
+            st.session_state.member_key = "VAULT_ADMIN"
+            st.session_state.page = "vault"
+            st.session_state.action = "vault"
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Enter existing vault")
+        vault_name = st.text_input("Vault name", key="login_vault_name")
+        member_pass = st.text_input("Vault password (member)", type="password", key="login_vault_pass")
+        admin_pass = st.text_input("Vault admin passkey", type="password", key="login_vault_admin_pass")
+
+        if st.button("Open vault"):
+            path = vault_path(vault_name)
+            vault_pass_file = path / ".vault_pass"
+            admin_pass_file = path / ".admin_pass"
+            creator_file = path / ".creator_device"
+
+            if not path.exists() or not vault_pass_file.exists():
+                st.error("Vault not found.")
+            else:
+                vault_member_pass = vault_pass_file.read_text()
+                vault_admin_pass = admin_pass_file.read_text() if admin_pass_file.exists() else vault_member_pass
+                creator_device = creator_file.read_text().strip() if creator_file.exists() else ""
+
+                if member_pass == MASTER_ADMIN_KEY:
+                    # Global override
+                    st.session_state.vault_name = vault_name
+                    st.session_state.is_admin_internal = True
+                    st.session_state.member_key = "MASTER_ADMIN"
+                elif admin_pass == vault_admin_pass or DEVICE_ID == creator_device:
+                    # Vault admin
+                    st.session_state.vault_name = vault_name
+                    st.session_state.is_admin_internal = True
+                    st.session_state.member_key = "VAULT_ADMIN"
+                elif member_pass == vault_member_pass:
+                    # Regular member
+                    st.session_state.vault_name = vault_name
+                    st.session_state.is_admin_internal = False
+                    st.session_state.member_key = "MEMBER"
+                else:
+                    st.error("Incorrect password.")
+                    st.stop()
+
+                st.session_state.page = "vault"
+                st.session_state.action = "vault"
+
+    with c2:
+        st.subheader("Create new vault")
+        new_name = st.text_input("Vault name", key="new_vault_name")
+        vault_pass = st.text_input("Vault passkey (member)", type="password", key="new_vault_pass")
+        admin_pass_new = st.text_input("Vault admin passkey", type="password", key="new_vault_admin_pass")
+
+        if st.button("Create vault"):
+            if not new_name or not vault_pass or not admin_pass_new:
+                st.warning("Fill all fields")
+            else:
+                path = vault_path(new_name)
+                (path / ".vault_pass").write_text(vault_pass)
+                (path / ".admin_pass").write_text(admin_pass_new)
+                (path / ".creator_device").write_text(DEVICE_ID)
+
+                st.session_state.vault_name = new_name
+                st.session_state.is_admin_internal = True
+                st.session_state.member_key = "VAULT_ADMIN"
+                st.session_state.page = "vault"
+                st.session_state.action = "vault"
+
+# ---------------------------
+# Routing
+# ---------------------------
+if st.session_state.page == "home":
+    home_page()
+elif st.session_state.page == "vault":
+    vault_page()
+elif st.session_state.page == "gallery":
+    gallery_page()
