@@ -134,6 +134,13 @@ def log_activity(vault_name: str, actor: str, action: str, filename: str, detail
     except Exception:
         pass
 
+def upload_to_bucket(bucket_name: str, file_obj, filename: str):
+    try:
+        create_bucket_if_needed(bucket_name)  # 🔧 Ensure bucket exists
+        data = file_obj.getbuffer().tobytes() if hasattr(file_obj, "getbuffer") else file_obj.read()
+        supabase.storage.from_(bucket_name).upload(filename, data)
+
+
 # ----------------- Sessions -----------------
 def create_session(vault_name: str, is_admin_internal: bool, is_ui_admin: bool):
     token = str(uuid.uuid4())
