@@ -82,11 +82,11 @@ def vault_page():
         st.session_state.page = "gallery"
         st.session_state.action = "gallery"
 
-    uploaded_files = st.file_uploader("Upload images/PDFs", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Upload images (lyrics, posters, etc.)", accept_multiple_files=True, type=["png", "jpg", "jpeg", "webp"])
     if uploaded_files:
         for f in uploaded_files:
             save_file(vault_name, f)
-        st.success("Uploaded successfully!")
+        st.success("✅ Uploaded successfully!")
 
 def gallery_page():
     vault_name = st.session_state.vault_name
@@ -96,9 +96,19 @@ def gallery_page():
         st.session_state.page = "vault"
         st.session_state.action = "vault"
 
+    # --- Search bar ---
+    search_query = st.text_input("🔍 Search lyrics or image name", placeholder="Type to search...").strip().lower()
+
     files = list_files(vault_name)
+    # Only show image types
+    files = [f for f in files if f.split(".")[-1].lower() in ("jpg", "jpeg", "png", "gif", "webp")]
+
+    # Filter files by search term (ignore extension)
+    if search_query:
+        files = [f for f in files if search_query in f.lower().replace(".jpg", "").replace(".jpeg", "").replace(".png", "").replace(".webp", "").replace(".gif", "")]
+
     if not files:
-        st.info("No files yet.")
+        st.info("No matching images found.")
         return
 
     per_row = 3
@@ -111,16 +121,11 @@ def gallery_page():
             if idx >= len(files):
                 break
             fname = files[idx]
-            ext = fname.split(".")[-1].lower()
             with cols[c]:
-                if ext in ("jpg", "jpeg", "png", "gif", "webp"):
-                    st.image(str(vault_path(vault_name) / fname))
-                else:
-                    st.write("📄 File")
-
+                st.image(str(vault_path(vault_name) / fname))
                 st.markdown(f"**{fname}**")
 
-                # Admin-only actions
+                # Admin-only options
                 if st.session_state.is_admin_internal:
                     new_name = st.text_input("Rename to", value=fname, key=f"rename_{fname}")
                     if st.button("Rename", key=f"btn_rn_{fname}"):
@@ -155,7 +160,6 @@ def home_page():
 
                 # LOGIN LOGIC
                 if member_pass == MASTER_ADMIN_KEY:
-                    # Master override
                     st.session_state.vault_name = vault_name
                     st.session_state.is_admin_internal = True
                     st.session_state.member_key = "MASTER_ADMIN"
