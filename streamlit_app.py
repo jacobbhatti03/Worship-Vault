@@ -53,12 +53,26 @@ def save_file(vault_name, uploaded_file):
         f.write(uploaded_file.getbuffer())
 
 def rename_file(vault_name, old_name, new_name):
+    """Safely rename a file by copying then deleting the old one."""
     old_path = vault_path(vault_name) / old_name
     new_path = vault_path(vault_name) / new_name
-    if old_path.exists():
-        old_path.rename(new_path)
+
+    # Don’t allow overwriting existing files
+    if not old_path.exists():
+        return False
+    if new_path.exists():
+        return False
+
+    try:
+        # Copy content safely
+        with open(old_path, "rb") as src, open(new_path, "wb") as dst:
+            dst.write(src.read())
+        old_path.unlink()  # Delete old only if copy succeeded
         return True
-    return False
+    except Exception as e:
+        print(f"Rename failed: {e}")
+        return False
+
 
 def delete_file(vault_name, filename):
     path = vault_path(vault_name) / filename
