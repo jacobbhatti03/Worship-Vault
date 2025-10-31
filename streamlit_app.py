@@ -3,7 +3,6 @@ import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
 import os, math
-from uuid import uuid4
 
 # ---------------------------
 # Config
@@ -53,26 +52,15 @@ def save_file(vault_name, uploaded_file):
         f.write(uploaded_file.getbuffer())
 
 def rename_file(vault_name, old_name, new_name):
-    """Safely rename a file by copying then deleting the old one."""
     old_path = vault_path(vault_name) / old_name
     new_path = vault_path(vault_name) / new_name
-
-    # Don’t allow overwriting existing files
-    if not old_path.exists():
-        return False
-    if new_path.exists():
-        return False
-
-    try:
-        # Copy content safely
-        with open(old_path, "rb") as src, open(new_path, "wb") as dst:
-            dst.write(src.read())
-        old_path.unlink()  # Delete old only if copy succeeded
-        return True
-    except Exception as e:
-        print(f"Rename failed: {e}")
-        return False
-
+    if old_path.exists():
+        # avoid overwriting a different existing file
+        if new_path.exists() and new_path.resolve() != old_path.resolve():
+            return False, "Target filename already exists."
+        old_path.rename(new_path)
+        return True, None
+    return False, "Original file not found."
 
 def delete_file(vault_name, filename):
     path = vault_path(vault_name) / filename
@@ -96,7 +84,11 @@ def vault_page():
         st.session_state.page = "gallery"
         st.session_state.action = "gallery"
 
-    uploaded_files = st.file_uploader("Upload images (lyrics, posters, etc.)", accept_multiple_files=True, type=["png", "jpg", "jpeg", "webp"])
+    uploaded_files = st.file_uploader(
+        "Upload images (lyrics, posters, etc.)",
+        accept_multiple_files=True,
+        type=["png", "jpg", "jpeg", "webp", "gif"]
+    )
     if uploaded_files:
         for f in uploaded_files:
             save_file(vault_name, f)
@@ -114,40 +106,91 @@ def gallery_page():
     search_query = st.text_input("🔍 Search lyrics or image name", placeholder="Type to search...").strip().lower()
 
     files = list_files(vault_name)
-    # Only show image types
-    files = [f for f in files if f.split(".")[-1].lower() in ("jpg", "jpeg", "png", "gif", "webp")]
+    # Only include common image extensions
+    image_exts = ("jpg", "jpeg", "png", "gif", "webp")
+    image_files = [f for f in files if f.split(".")[-1].lower() in image_exts]
 
-    # Filter files by search term (ignore extension)
+    # Helper: filename without extension
+    def name_without_ext(fn: str) -> str:
+        if "." in fn:
+            return ".".join(fn.split(".")[:-1])
+        return fn
+
+    # Filter files by search term (compare without extension)
     if search_query:
-        files = [f for f in files if search_query in f.lower().replace(".jpg", "").replace(".jpeg", "").replace(".png", "").replace(".webp", "").replace(".gif", "")]
+        filtered = []
+        for f in image_files:
+            base = name_without_ext(f).lower()
+            if search_query in base:
+                filtered.append(f)
+        image_files = filtered
 
-    if not files:
+    if not image_files:
         st.info("No matching images found.")
         return
 
     per_row = 3
-    rows = math.ceil(len(files) / per_row)
+    rows = math.ceil(len(image_files) / per_row)
     idx = 0
 
+    # Show images in grid and allow admin actions
     for _ in range(rows):
         cols = st.columns(per_row, gap="large")
         for c in range(per_row):
-            if idx >= len(files):
+            if idx >= len(image_files):
                 break
-            fname = files[idx]
+            fname = image_files[idx]
+            ext = fname.split(".")[-1].lower()
+            key_base = fname  # unique key per file (including extension)
+
             with cols[c]:
-                st.image(str(vault_path(vault_name) / fname))
+                st.image(str(vault_path(vault_name) / fname), caption=fname)
                 st.markdown(f"**{fname}**")
 
                 # Admin-only options
                 if st.session_state.is_admin_internal:
-                    new_name = st.text_input("Rename to", value=fname, key=f"rename_{fname}")
-                    if st.button("Rename", key=f"btn_rn_{fname}"):
-                        rename_file(vault_name, fname, new_name)
-                        st.session_state.action = "refresh"
-                    if st.button("Delete", key=f"btn_del_{fname}"):
-                        delete_file(vault_name, fname)
-                        st.session_state.action = "refresh"
+                    # Show rename input prefilled WITHOUT the extension (more natural)
+                    rename_key = f"rename_{key_base}"
+                    default_without_ext = name_without_ext(fname)
+                    # initialize state value if not present to keep the displayed value consistent
+                    if rename_key not in st.session_state:
+                        st.session_state[rename_key] = default_without_ext
+
+                    new_name_raw = st.text_input("Rename to (no need to add extension)", key=rename_key)
+                    if st.button("Rename", key=f"btn_rn_{key_base}"):
+                        # If user omitted extension, append original extension
+                        candidate = new_name_raw.strip()
+                        if not candidate:
+                            st.error("Name cannot be empty.")
+                        else:
+                            if "." not in candidate:
+                                candidate = f"{candidate}.{ext}"
+                            success, err = rename_file(vault_name, fname, candidate)
+                            if success:
+                                st.success("Renamed successfully.")
+                                # update session state keys to reflect new filename
+                                # move the rename input to new key to avoid duplicate keys next render
+                                new_key = f"rename_{candidate}"
+                                st.session_state[new_key] = name_without_ext(candidate)
+                                # remove old key if exists
+                                if rename_key in st.session_state:
+                                    try:
+                                        del st.session_state[rename_key]
+                                    except Exception:
+                                        pass
+                                st.session_state.action = "refresh"
+                                st.experimental_rerun()
+                            else:
+                                st.error(f"Rename failed: {err}")
+
+                    if st.button("Delete", key=f"btn_del_{key_base}"):
+                        if delete_file(vault_name, fname):
+                            st.success("Deleted.")
+                            st.session_state.action = "refresh"
+                            st.experimental_rerun()
+                        else:
+                            st.error("Delete failed.")
+
             idx += 1
 
 def home_page():
