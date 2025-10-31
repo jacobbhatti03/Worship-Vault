@@ -9,31 +9,28 @@ import uuid
 from pathlib import Path
 import socket
 
-# ----------------- Config (set these in Streamlit secrets or environment) ----------
+# ----------------- Config -----------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-MASTER_ADMIN_KEY = os.getenv("MASTER_ADMIN_KEY")  # invisible master key you set
+MASTER_ADMIN_KEY = os.getenv("MASTER_ADMIN_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("SUPABASE_URL and SUPABASE_KEY must be set in environment variables / Streamlit secrets.")
+    st.error("SUPABASE_URL and SUPABASE_KEY must be set.")
     st.stop()
 
 if not MASTER_ADMIN_KEY:
-    st.warning("MASTER_ADMIN_KEY not set; master admin won't work until you set it in env/secrets.")
+    st.warning("MASTER_ADMIN_KEY not set; master admin won't work until set in env/secrets.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 st.set_page_config(page_title="Worship Vault", layout="wide")
 
-# ----------------- Host-device identity (bind admin to the host running the app) ----------
-# This uses a small file `host.id` stored where the app runs. If app runs on your PC/phone,
-# that machine becomes the creator when it creates a vault.
+# ----------------- Host identity -----------------
 HOST_ID_FILE = Path("host.id")
 if not HOST_ID_FILE.exists():
-    # include hostname to make it recognizable
     HOST_ID_FILE.write_text(f"{socket.gethostname()}-{uuid.uuid4()}")
 HOST_ID = HOST_ID_FILE.read_text().strip()
 
-# ----------------- Helper utilities -----------------
+# ----------------- Helpers -----------------
 def _data_from_res(res):
     if res is None:
         return None
@@ -47,10 +44,6 @@ def safe_signed_url(bucket: str, path: str, expires=60):
     try:
         res = supabase.storage.from_(bucket).create_signed_url(path, expires)
         if isinstance(res, dict):
-            for k in ("signedURL", "signed_url", "signedUrl"):
-                if res.get(k):
-                    return res.get(k)
-        if hasattr(res, "get"):
             return res.get("signedURL") or res.get("signed_url") or res.get("signedUrl")
     except Exception:
         pass
@@ -60,7 +53,7 @@ def create_bucket_if_needed(bucket_name: str):
     try:
         res = supabase.storage.get_buckets()
         buckets = _data_from_res(res) or []
-        if any((b.get("name") == bucket_name if isinstance(b, dict) else getattr(b, "name", None) == bucket_name) for b in buckets):
+        if any((b.get("name") == bucket_name) for b in buckets if isinstance(b, dict)):
             return
         supabase.storage.create_bucket(bucket_name, public=False)
     except Exception:
@@ -70,21 +63,23 @@ def list_bucket_files(bucket_name: str):
     try:
         res = supabase.storage.from_(bucket_name).list()
         data = _data_from_res(res) or []
-        files = []
-        for item in data:
-            if isinstance(item, dict) and item.get("name"):
-                files.append(item["name"])
-            elif hasattr(item, "name"):
-                files.append(getattr(item, "name"))
+        files = [item["name"] for item in data if isinstance(item, dict) and "name" in item]
         return sorted(files, key=lambda s: s.lower())
     except Exception:
         return []
 
 def upload_to_bucket(bucket_name: str, file_obj, filename: str):
     try:
+        # ✅ FIX: Convert memoryview safely to bytes before upload
         data = file_obj.getbuffer() if hasattr(file_obj, "getbuffer") else file_obj.read()
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        elif not isinstance(data, (bytes, bytearray)):
+            data = bytes(data)
+
         supabase.storage.from_(bucket_name).upload(filename, data)
         public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket_name}/{filename}"
+
         supabase.table("uploads").insert({
             "filename": filename,
             "url": public_url,
@@ -108,7 +103,6 @@ def download_file_bytes(bucket_name: str, filename: str):
             return data
     except Exception:
         pass
-    # fallback signed url
     try:
         url = safe_signed_url(bucket_name, filename, expires=60)
         r = requests.get(url)
@@ -172,12 +166,12 @@ def validate_session():
         data = _data_from_res(res) or []
         if not data:
             return False
-        session_row = data[0]
-        created_at = datetime.fromisoformat(session_row["created_at"])
+        s = data[0]
+        created_at = datetime.fromisoformat(s["created_at"])
         if datetime.utcnow() - created_at < timedelta(hours=24):
-            st.session_state.vault_name = session_row["vault_name"]
-            st.session_state.is_admin_internal = session_row.get("is_admin_internal", False)
-            st.session_state.is_ui_admin = session_row.get("is_ui_admin", False)
+            st.session_state.vault_name = s["vault_name"]
+            st.session_state.is_admin_internal = s.get("is_admin_internal", False)
+            st.session_state.is_ui_admin = s.get("is_ui_admin", False)
             st.session_state.login_time = created_at
             st.session_state.page = "vault"
             return True
@@ -197,18 +191,17 @@ def end_session():
             del st.session_state[k]
     st.session_state.page = "home"
 
-# ----------------- Session defaults -----------------
+# ----------------- Defaults -----------------
 st.session_state.setdefault("page", "home")
 st.session_state.setdefault("token", None)
 st.session_state.setdefault("vault_name", None)
 st.session_state.setdefault("is_admin_internal", False)
 st.session_state.setdefault("is_ui_admin", False)
 st.session_state.setdefault("login_time", None)
-
 if st.session_state.token:
     validate_session()
 
-# ----------------- UI & Pages -----------------
+# ----------------- UI -----------------
 ACCENT = "#FF4B5C"
 CARD_BG = "rgba(255,255,255,0.18)"
 TEXT_COLOR = "#0b1220"
@@ -218,7 +211,6 @@ def home_page():
     st.divider()
     c1, c2 = st.columns(2)
 
-    # Enter existing
     with c1:
         st.subheader("Enter Existing Vault")
         vault_input = st.text_input("Vault name", key="login_vault_name")
@@ -234,27 +226,19 @@ def home_page():
                     st.error(f"Failed to query vaults: {e}")
                     rows = []
 
-                vault_row = None
-                for r in rows:
-                    if r.get("vault_name", "").strip().lower() == vault_input.strip().lower():
-                        vault_row = r
-                        break
-
+                vault_row = next((r for r in rows if r.get("vault_name", "").strip().lower() == vault_input.strip().lower()), None)
                 if not vault_row:
-                    st.error("Vault not found. Check spelling or create it.")
+                    st.error("Vault not found.")
                 else:
                     if passkey_input == MASTER_ADMIN_KEY:
-                        # master admin: internal admin but no UI admin toggles (invisible)
                         create_session(vault_row["vault_name"], True, False)
                     elif passkey_input == vault_row.get("admin_passkey"):
-                        # vault admin (UI admin true)
                         create_session(vault_row["vault_name"], True, True)
                     elif passkey_input == vault_row.get("vault_passkey"):
                         create_session(vault_row["vault_name"], False, False)
                     else:
                         st.error("Incorrect passkey.")
 
-    # Create vault (with duplicate check)
     with c2:
         st.subheader("Create New Vault")
         new_name = st.text_input("New Vault Name", key="new_vault_name")
@@ -262,19 +246,18 @@ def home_page():
         admin_pass = st.text_input("Admin Passkey (Vault Admin)", type="password", key="new_admin_pass")
         if st.button("Create Vault", key="create_vault_btn"):
             if not new_name or not vault_pass or not admin_pass:
-                st.warning("Fill all fields to create the vault.")
+                st.warning("Fill all fields.")
             else:
                 normalized = new_name.strip()
                 try:
                     res = supabase.table("vaults").select("vault_name").execute()
                     rows = _data_from_res(res) or []
-                    existing_names = [r.get("vault_name","").strip().lower() for r in rows]
-                except Exception as e:
-                    st.error(f"Error checking existing vaults: {e}")
-                    existing_names = []
+                    existing = [r.get("vault_name", "").strip().lower() for r in rows]
+                except Exception:
+                    existing = []
 
-                if normalized.lower() in existing_names:
-                    st.error(f"A vault named '{normalized}' already exists. Choose another name.")
+                if normalized.lower() in existing:
+                    st.error(f"A vault named '{normalized}' already exists.")
                 else:
                     bucket_name = normalized.lower().replace(" ", "-")
                     create_bucket_if_needed(bucket_name)
@@ -287,9 +270,8 @@ def home_page():
                             "created_at": datetime.utcnow().isoformat()
                         }).execute()
                         create_session(normalized, True, True)
-                        st.success(f"Vault '{normalized}' created and logged in as admin on this host.")
+                        st.success(f"Vault '{normalized}' created.")
                     except Exception as e:
-                        # if duplicate still happens, show friendly message
                         st.error(f"Vault creation failed: {e}")
 
 def vault_page():
@@ -298,35 +280,23 @@ def vault_page():
     is_ui_admin = st.session_state.is_ui_admin
 
     st.markdown(f"<h2 style='color:{TEXT_COLOR};'>📂 Vault — {vault}</h2>", unsafe_allow_html=True)
+    if st.button("⬅ Back to Home"):
+        end_session()
+    if is_ui_admin and st.button("View Activity Log"):
+        st.session_state.page = "activity_log"
 
-    # small menu (single-click)
-    left_col, right_col = st.columns([0.92, 0.08])
-    with right_col:
-        if st.button("⋮ Menu"):
-            st.session_state.show_menu = not st.session_state.get("show_menu", False)
-
-        if st.session_state.get("show_menu", False):
-            if st.button("Back to Home"):
-                end_session()
-            if is_ui_admin:
-                if st.button("View Activity Log"):
-                    st.session_state.page = "activity_log"
-
-    # upload area
     with st.expander("Upload files"):
-        files = st.file_uploader("Images (jpg, png, webp, gif) or PDFs", accept_multiple_files=True)
+        files = st.file_uploader("Upload Images/PDFs", accept_multiple_files=True)
         if files:
             for f in files:
                 ok = upload_to_bucket(vault, f, f.name)
                 actor = "VAULT_ADMIN" if is_internal and is_ui_admin else ("MASTER_ADMIN" if is_internal and not is_ui_admin else "MEMBER")
                 if ok:
                     log_activity(vault, actor, "upload", f.name)
-            st.success("Uploaded files (if any).")
+            st.success("Uploaded successfully.")
 
-    c1, c2 = st.columns([0.6, 0.4])
-    with c1:
-        if st.button("View Gallery"):
-            st.session_state.page = "gallery"
+    if st.button("View Gallery"):
+        st.session_state.page = "gallery"
 
 def gallery_page():
     vault = st.session_state.vault_name
@@ -334,7 +304,6 @@ def gallery_page():
     is_ui_admin = st.session_state.is_ui_admin
 
     st.markdown(f"<h2 style='color:{ACCENT};'>🖼️ Gallery — {vault}</h2>", unsafe_allow_html=True)
-    st.divider()
     if st.button("⬅ Back to Vault"):
         st.session_state.page = "vault"
 
@@ -344,97 +313,47 @@ def gallery_page():
         return
 
     per_row = 3
-    total = len(files)
-    rows = math.ceil(total / per_row)
     idx = 0
-    for r in range(rows):
-        cols = st.columns(per_row, gap="large")
-        for c in range(per_row):
-            if idx >= total:
-                cols[c].empty()
-            else:
-                fname = files[idx]
-                with cols[c]:
-                    st.markdown(f"""
-                        <div style="
-                            border-radius:12px;
-                            padding:8px;
-                            box-shadow: 0 6px 18px rgba(11,17,32,0.06);
-                            background: {CARD_BG};
-                            text-align:center;
-                        ">
-                    """, unsafe_allow_html=True)
-
-                    ext = fname.split(".")[-1].lower()
-                    if ext in ("jpg", "jpeg", "png", "gif", "webp"):
-                        url = safe_signed_url(vault, fname)
-                        try:
-                            st.image(url)
-                        except Exception:
-                            st.write("🖼️ Preview not available")
-                    else:
-                        st.write("📄 File")
-
-                    st.markdown(f"**{fname}**")
-
-                    new_key = f"rename_{vault}_{fname}"
-                    new_name = st.text_input("Rename to", value=fname, key=new_key)
-                    if st.button("Rename", key=f"rn_btn_{vault}_{fname}"):
-                        b = download_file_bytes(vault, fname)
-                        if b:
-                            try:
-                                supabase.storage.from_(vault).upload(new_name, b)
-                                supabase.table("uploads").update({
-                                    "filename": new_name,
-                                    "url": f"{SUPABASE_URL}/storage/v1/object/public/{vault}/{new_name}"
-                                }).eq("filename", fname).eq("vault_name", vault).execute()
-                                supabase.storage.from_(vault).remove([fname])
-                                actor = "VAULT_ADMIN" if is_internal and is_ui_admin else ("MASTER_ADMIN" if is_internal and not is_ui_admin else "MEMBER")
-                                log_activity(vault, actor, "rename", fname, details=new_name)
-                                st.success(f"Renamed {fname} → {new_name}")
-                            except Exception as e:
-                                st.error(f"Rename failed: {e}")
-                        else:
-                            st.error("Could not download file to rename.")
-
-                    if is_internal:
-                        if st.button("Delete", key=f"del_{vault}_{fname}"):
-                            ok = remove_file(vault, fname)
-                            if ok:
-                                actor = "VAULT_ADMIN" if is_ui_admin else ("MASTER_ADMIN")
-                                log_activity(vault, actor, "delete", fname)
-                                st.success(f"{fname} deleted")
-
-                    st.markdown("</div>", unsafe_allow_html=True)
-                idx += 1
+    for _ in range(math.ceil(len(files)/per_row)):
+        cols = st.columns(per_row)
+        for c in cols:
+            if idx >= len(files):
+                break
+            fname = files[idx]
+            with c:
+                ext = fname.split(".")[-1].lower()
+                if ext in ("jpg", "jpeg", "png", "gif", "webp"):
+                    st.image(safe_signed_url(vault, fname))
+                else:
+                    st.write("📄 File")
+                st.markdown(f"**{fname}**")
+                new_name = st.text_input("Rename to", value=fname, key=f"rename_{vault}_{fname}")
+                if st.button("Rename", key=f"rn_{vault}_{fname}"):
+                    b = download_file_bytes(vault, fname)
+                    if b:
+                        supabase.storage.from_(vault).upload(new_name, b)
+                        supabase.storage.from_(vault).remove([fname])
+                        st.success(f"{fname} → {new_name}")
+                if is_internal and st.button("Delete", key=f"del_{vault}_{fname}"):
+                    remove_file(vault, fname)
+                    st.success(f"{fname} deleted")
+            idx += 1
 
 def activity_log_page():
     vault = st.session_state.vault_name
-    st.markdown(f"<h2 style='color:{TEXT_COLOR};'>📝 Activity Log — {vault}</h2>", unsafe_allow_html=True)
     if st.button("⬅ Back to Vault"):
         st.session_state.page = "vault"
         return
-
     try:
         res = supabase.table("vault_logs").select("*").eq("vault_name", vault).order("created_at", desc=True).execute()
         logs = _data_from_res(res) or []
     except Exception as e:
         st.error(f"Failed to fetch logs: {e}")
         logs = []
-
-    if not logs:
-        st.info("No activity yet.")
-        return
-
     for row in logs:
-        ts = row.get("created_at", "")
-        actor = row.get("actor", "")
-        action = row.get("action", "")
-        filename = row.get("filename", "")
-        details = row.get("details", "")
-        st.markdown(f"*[{ts}]* **{actor}** — {action} — `{filename}` {('- ' + details) if details else ''}")
+        st.markdown(f"*{row.get('created_at')}* — **{row.get('actor')}** — {row.get('action')} `{row.get('filename')}`")
 
-# ----------------- Routing ---------------
+# ----------------- Routing -----------------
 if st.session_state.page == "home":
     home_page()
 elif st.session_state.page == "vault":
@@ -442,8 +361,4 @@ elif st.session_state.page == "vault":
 elif st.session_state.page == "gallery":
     gallery_page()
 elif st.session_state.page == "activity_log":
-    if st.session_state.is_ui_admin:
-        activity_log_page()
-    else:
-        st.error("Not authorized to view activity logs.")
-        st.session_state.page = "vault"
+    activity_log_page()
