@@ -2,7 +2,7 @@
 import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
-import os, math, json
+import os, math
 from uuid import uuid4
 
 # ---------------------------
@@ -12,12 +12,6 @@ load_dotenv()
 
 VAULTS_FOLDER = Path("vaults")
 VAULTS_FOLDER.mkdir(exist_ok=True)
-
-# Persistent device ID
-DEVICE_FILE = Path("device.id")
-if not DEVICE_FILE.exists():
-    DEVICE_FILE.write_text(str(uuid4()))
-DEVICE_ID = DEVICE_FILE.read_text().strip()
 
 MASTER_ADMIN_KEY = os.getenv("MASTER_ADMIN_KEY", "YOUR_MASTER_KEY")
 
@@ -141,24 +135,6 @@ def home_page():
     st.title("🙏 Worship Vault")
     st.divider()
 
-    # Auto-login if this device owns any vault
-    auto_vault = None
-    for v in VAULTS_FOLDER.iterdir():
-        if v.is_dir() and (v / ".creator_device").exists():
-            creator = (v / ".creator_device").read_text().strip()
-            if creator == DEVICE_ID:
-                auto_vault = v.name
-                break
-
-    if auto_vault:
-        st.info(f"💾 This device owns vault: **{auto_vault}**")
-        if st.button("Login as Admin"):
-            st.session_state.vault_name = auto_vault
-            st.session_state.is_admin_internal = True
-            st.session_state.member_key = "VAULT_ADMIN"
-            st.session_state.page = "vault"
-            st.session_state.action = "vault"
-
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Enter existing vault")
@@ -170,27 +146,28 @@ def home_page():
             path = vault_path(vault_name)
             vault_pass_file = path / ".vault_pass"
             admin_pass_file = path / ".admin_pass"
-            creator_file = path / ".creator_device"
 
             if not path.exists() or not vault_pass_file.exists():
                 st.error("Vault not found.")
             else:
                 vault_member_pass = vault_pass_file.read_text()
                 vault_admin_pass = admin_pass_file.read_text() if admin_pass_file.exists() else vault_member_pass
-                creator_device = creator_file.read_text().strip() if creator_file.exists() else ""
 
+                # LOGIN LOGIC
                 if member_pass == MASTER_ADMIN_KEY:
-                    # Global override
+                    # Master override
                     st.session_state.vault_name = vault_name
                     st.session_state.is_admin_internal = True
                     st.session_state.member_key = "MASTER_ADMIN"
-                elif admin_pass == vault_admin_pass or DEVICE_ID == creator_device:
-                    # Vault admin
-                    st.session_state.vault_name = vault_name
-                    st.session_state.is_admin_internal = True
-                    st.session_state.member_key = "VAULT_ADMIN"
+                elif admin_pass:
+                    if admin_pass == vault_admin_pass:
+                        st.session_state.vault_name = vault_name
+                        st.session_state.is_admin_internal = True
+                        st.session_state.member_key = "VAULT_ADMIN"
+                    else:
+                        st.error("Incorrect admin passkey.")
+                        st.stop()
                 elif member_pass == vault_member_pass:
-                    # Regular member
                     st.session_state.vault_name = vault_name
                     st.session_state.is_admin_internal = False
                     st.session_state.member_key = "MEMBER"
@@ -204,17 +181,16 @@ def home_page():
     with c2:
         st.subheader("Create new vault")
         new_name = st.text_input("Vault name", key="new_vault_name")
-        vault_pass = st.text_input("Vault passkey (member)", type="password", key="new_vault_pass")
+        vault_pass_new = st.text_input("Vault passkey (member)", type="password", key="new_vault_pass")
         admin_pass_new = st.text_input("Vault admin passkey", type="password", key="new_vault_admin_pass")
 
         if st.button("Create vault"):
-            if not new_name or not vault_pass or not admin_pass_new:
+            if not new_name or not vault_pass_new or not admin_pass_new:
                 st.warning("Fill all fields")
             else:
                 path = vault_path(new_name)
-                (path / ".vault_pass").write_text(vault_pass)
+                (path / ".vault_pass").write_text(vault_pass_new)
                 (path / ".admin_pass").write_text(admin_pass_new)
-                (path / ".creator_device").write_text(DEVICE_ID)
 
                 st.session_state.vault_name = new_name
                 st.session_state.is_admin_internal = True
